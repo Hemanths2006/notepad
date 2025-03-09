@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enhanced Animated Notepad</title>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.15.0/firebase-app.js";
+        import { getDatabase, ref, set, get, child } from "https://www.gstatic.com/firebasejs/9.15.0/firebase-database.js";
+
+        const firebaseConfig = {
+            databaseURL: "https://chaa-app-default-rtdb.firebaseio.com/" // Replace with your Firebase database URL
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const database = getDatabase(app);
+
+        const deriveKey = async (password) => {
+            const encoder = new TextEncoder();
+            const salt = encoder.encode("some-random-salt"); // Use a fixed or random salt
+            const keyMaterial = await crypto.subtle.importKey(
+                'raw',
+                encoder.encode(password),
+                { name: 'PBKDF2' },
+                false,
+                ['deriveKey']
+            );
+            return crypto.subtle.deriveKey(
+                {
+                    name: 'PBKDF2',
+                    salt,
+                    iterations: 100000, // Adjust the number of iterations as needed
+                    hash: 'SHA-256'
+                },
+                keyMaterial,
+                { name: 'AES-GCM', length: 256 }, // Derive a 256-bit key
+                true,
+                ['encrypt', 'decrypt']
+            );
+        };
+
+        const encryptNote = async (content, password) => {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(content);
+            const key = await deriveKey(password);
+            const iv = crypto.getRandomValues(new Uint8Array(12)); // Initialization Vector
+            const encrypted = await crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv },
+                key,
+                data
+            );
+            return JSON.stringify({
+                iv: Array.from(iv),
+                content: Array.from(new Uint8Array(encrypted))
+            });
+        };
+
+        const decryptNote = async (encryptedContent, password) => {
+            const encoder = new TextEncoder();
+            const decoder = new TextDecoder();
+            const key = await deriveKey(password);
+            const { iv, content } = JSON.parse(encryptedContent);
+            const decrypted = await crypto.subtle.decrypt(
+                { name: 'AES-GCM', iv: new Uint8Array(iv) },
+                key,
+                new Uint8Array(content)
+            );
+            return decoder.decode(decrypted);
+        };
+
+        const saveNote = async () => {
+            const secretKey = document.getElementById('saveSecretKey').value.trim();
+            const noteContent = document.getElementById('notepad').innerText.trim();
+            const password = document.getElementById('savePassword').value.trim();
+
+            if (!secretKey || !noteContent || !password) {
+                showMessage("Secret key, note, and password cannot be empty.", "error");
+                return;
+            }
+
+            if (secretKey.length > 20) {
+                showMessage("Secret key must be less than 20 characters.", "error");
+                return;
+            }
+
+            try {
+                showLoader();
+                const encryptedContent = await encryptNote(noteContent, password);
+                const snapshot = await get(child(ref(database), 'notes/' + secretKey));
+                if (snapshot.exists()) {
+                    showMessage("This key already exists. Please choose another key.", "error");
+                } else {
+                    await set(ref(database, 'notes/' + secretKey), { content: encryptedContent });
+                    showMessage("Note saved successfully!", "success");
+                    closePopup('saveForm');
+                }
+            } catch (error) {
+                console.error("Error saving note:", error); // Log the error for debugging
+                showMessage("Error saving note: " + error.message, "error");
+            } finally {
+                hideLoader();
+            }
+        };
+
+        const viewNote = async () => {
+            const secretKey = document.getElementById('viewSecretKey').value.trim();
+            const password = document.getElementById('viewPassword').value.trim();
+
+            if (!secretKey || !password) {
+                showMessage("Secret key and password cannot be empty.", "error");
+                return;
+            }
+
+            try {
+                showLoader();
+                const snapshot = await get(child(ref(database), 'notes/' + secretKey));
+                if (snapshot.exists()) {
+                    const decryptedContent = await decryptNote(snapshot.val().content, password);
+                    document.getElementById("noteDisplay").innerText = decryptedContent;
+                    document.getElementById("noteViewer").style.display = "flex";
+                    document.getElementById("editNote").style.display = "block"; // Show edit button
+                } else {
+                    showMessage("No note found for this secret key.", "error");
+                }
+            } catch (error) {
+                console.error("Error retrieving note:", error); // Log the error for debugging
+                showMessage("Error retrieving note: " + error.message, "error");
+            } finally {
+                hideLoader();
+            }
+        };
+
+        const editNote = () => {
+            const noteDisplay = document.getElementById("noteDisplay");
+            const noteEdit = document.getElementById("noteEdit");
+            const editButton = document.getElementById("editNote");
+            const saveButton = document.getElementById("saveEditedNote");
+
+            // Switch to edit mode
+            noteEdit.value = noteDisplay.innerText;
+            noteDisplay.style.display = "none";
+            noteEdit.style.display = "block";
+            editButton.style.display = "none";
+            saveButton.style.display = "block";
+        };
+
+        const saveEditedNote = async () => {
+            const secretKey = document.getElementById('viewSecretKey').value.trim();
+            const password = document.getElementById('viewPassword').value.trim();
+            const updatedContent = document.getElementById("noteEdit").value.trim();
+
+            if (!secretKey || !password || !updatedContent) {
+                showMessage("Secret key, password, and note content cannot be empty.", "error");
+                return;
+            }
+
+            try {
+                showLoader();
+                const encryptedContent = await encryptNote(updatedContent, password);
+                await set(ref(database, 'notes/' + secretKey), { content: encryptedContent });
+                showMessage("Note updated successfully!", "success");
+
+                // Switch back to view mode
+                document.getElementById("noteDisplay").innerText = updatedContent;
+                document.getElementById("noteDisplay").style.display = "block";
+                document.getElementById("noteEdit").style.display = "none";
+                document.getElementById("editNote").style.display = "block";
+                document.getElementById("saveEditedNote").style.display = "none";
+            } catch (error) {
+                console.error("Error updating note:", error); // Log the error for debugging
+                showMessage("Error updating note: " + error.message, "error");
+            } finally {
+                hideLoader();
+            }
+        };
+
+        const showSaveForm = () => {
+            document.getElementById("saveForm").style.display = "flex";
+            document.getElementById("saveSecretKey").focus();
+        };
+
+        const showViewForm = () => {
+            document.getElementById("viewForm").style.display = "flex";
+            document.getElementById("viewSecretKey").focus();
+        };
+
+        const closePopup = (id) => {
+            document.getElementById(id).style.display = "none";
+        };
+
+        const clearNotepad = () => {
+            if (confirm("Are you sure you want to clear the notepad?")) {
+                document.getElementById('notepad').innerText = "";
+            }
+        };
+
+        const exportNote = () => {
+            const noteContent = document.getElementById('notepad').innerText;
+            const blob = new Blob([noteContent], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'note.txt';
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+
+        const undo = () => {
+            document.execCommand('undo', false, null);
+        };
+
+        const redo = () => {
+            document.execCommand('redo', false, null);
+        };
+
+        const showLoader = () => {
+            document.getElementById("loader").style.display = "flex";
+        };
+
+        const hideLoader = () => {
+            document.getElementById("loader").style.display = "none";
+        };
+
+        const showMessage = (message, type) => {
+            const messageArea = document.getElementById("messageArea");
+            messageArea.innerText = message;
+            messageArea.className = `message ${type}`;
+            messageArea.style.display = "block";
+            setTimeout(() => {
+                messageArea.style.display = "none";
+            }, 3000); // Hide message after 3 seconds
+        };
+
+        window.saveNote = saveNote;
+        window.viewNote = viewNote;
+        window.editNote = editNote;
+        window.saveEditedNote = saveEditedNote;
+        window.showSaveForm = showSaveForm;
+        window.showViewForm = showViewForm;
+        window.closePopup = closePopup;
+        window.clearNotepad = clearNotepad;
+        window.exportNote = exportNote;
+        window.undo = undo;
+        window.redo = redo;
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #2c3e50, #34495e);
+            color: #fff;
+            overflow: hidden;
+        }
+
+        .container {
+            position: relative;
+            width: 95%;
+            max-width: 800px;
+            height: 90vh;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #2c3e50;
+            border-radius: 15px;
+            box-shadow: 5px 5px 20px rgba(0, 0, 0, 0.2);
+            animation: fadeIn 1s ease-in-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.9); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        #notepad {
+            width: 100%;
+            height: 80%;
+            padding: 20px;
+            font-size: 18px;
+            border-radius: 10px;
+            border: 2px solid #555;
+            box-shadow: inset 2px 2px 10px rgba(0, 0, 0, 0.1);
+            resize: none;
+            outline: none;
+            white-space: pre-wrap;
+            overflow-y: auto;
+            background: #34495e;
+            color: #fff;
+        }
+
+        #notepad:focus {
+            border-color: #ff758c;
+        }
+
+        .buttons {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #ff758c, #ff5252);
+            color: white;
+            cursor: pointer;
+            transition: 0.3s;
+            font-size: 16px;
+            box-shadow: 2px 2px 10px rgba(0, 0, 0, 0.2);
+        }
+
+        button:hover {
+            background: linear-gradient(135deg, #ff5252, #ff1e56);
+            transform: translateY(-2px);
+        }
+
+        .input-container, .note-viewer {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #34495e;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 5px 5px 20px rgba(0, 0, 0, 0.3);
+            animation: fadeIn 0.5s ease-in-out;
+            width: 90%;
+            max-width: 800px;
+            height: 80%;
+        }
+
+        .input-container input {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 20px;
+            font-size: 16px;
+            border: 2px solid #555;
+            border-radius: 8px;
+            outline: none;
+            background: #2c3e50;
+            color: #fff;
+        }
+
+        .input-container input:focus {
+            border-color: #ff758c;
+        }
+
+        .close-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: #ff5252;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            cursor: pointer;
+            border-radius: 50%;
+            font-size: 18px;
+            transition: 0.3s;
+        }
+
+        .close-btn:hover {
+            background: #ff1e56;
+        }
+
+        .note-viewer {
+            width: 90%;
+            max-width: 800px;
+            height: 80%;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .note-viewer pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 16px;
+            line-height: 1.5;
+        }
+
+        #noteEdit {
+            width: 100%;
+            height: 80%;
+            padding: 20px;
+            font-size: 18px;
+            border-radius: 10px;
+            border: 2px solid #555;
+            box-shadow: inset 2px 2px 10px rgba(0, 0, 0, 0.1);
+            resize: none;
+            outline: none;
+            white-space: pre-wrap;
+            overflow-y: auto;
+            background: #34495e;
+            color: #fff;
+            display: none;
+        }
+
+        .creator-info {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 14px;
+            color: #fff;
+        }
+
+        .creator-info a {
+            display: flex;
+            align-items: center;
+            text-decoration: none;
+            color: #fff;
+        }
+
+        .creator-info img {
+            width: 24px;
+            height: 24px;
+        }
+
+        #loader {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            color: #ff5252;
+        }
+
+        .message {
+            display: none;
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 16px;
+            z-index: 1000;
+        }
+
+        .message.success {
+            background: #4caf50;
+            color: white;
+        }
+
+        .message.error {
+            background: #f44336;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="notepad" contenteditable="true" placeholder="Start writing..." aria-label="Notepad"></div>
+        <div class="buttons">
+            <button onclick="showSaveForm()" aria-label="Save Note">Save</button>
+            <button onclick="showViewForm()" aria-label="View Note">View</button>
+            <button onclick="clearNotepad()" aria-label="Clear Notepad">Clear</button>
+            <button onclick="exportNote()" aria-label="Export Note">Export</button>
+            <button onclick="undo()" aria-label="Undo">↺</button>
+            <button onclick="redo()" aria-label="Redo">↻</button>
+        </div>
+        <div class="creator-info">
+            Created by
+            <a href="https://www.instagram.com/iam.hemanth_/" target="_blank">
+                <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Instagram_icon.png" alt="Instagram Logo">
+            </a>
+        </div>
+    </div>
+
+    <!-- Save Form -->
+    <div id="saveForm" class="input-container">
+        <button class="close-btn" onclick="closePopup('saveForm')" aria-label="Close">X</button>
+        <input type="text" id="saveSecretKey" placeholder="Enter Secret Key" aria-label="Secret Key" />
+        <input type="password" id="savePassword" placeholder="Enter Password" aria-label="Password" />
+        <button onclick="saveNote()">Confirm</button>
+    </div>
+
+    <!-- View Form -->
+    <div id="viewForm" class="input-container">
+        <button class="close-btn" onclick="closePopup('viewForm')" aria-label="Close">X</button>
+        <input type="text" id="viewSecretKey" placeholder="Enter Secret Key" aria-label="Secret Key" />
+        <input type="password" id="viewPassword" placeholder="Enter Password" aria-label="Password" />
+        <button onclick="viewNote()">View</button>
+    </div>
+
+    <!-- Note Viewer -->
+    <div id="noteViewer" class="note-viewer">
+        <button class="close-btn" onclick="closePopup('noteViewer')" aria-label="Close">X</button>
+        <pre id="noteDisplay"></pre>
+        <textarea id="noteEdit"></textarea>
+        <button id="editNote" onclick="editNote()" style="display: none;">Edit</button>
+        <button id="saveEditedNote" onclick="saveEditedNote()" style="display: none;">Save Changes</button>
+    </div>
+
+    <!-- Loader -->
+    <div id="loader">Loading...</div>
+
+    <!-- Message Area -->
+    <div id="messageArea" class="message"></div>
+</body>
+</html>
